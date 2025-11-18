@@ -1257,6 +1257,7 @@ const HTML_PAGE = `
         </div>
     </div>
 
+    <script src="https://cdn.jsdelivr.net/npm/jszip@3.7.1/dist/jszip.min.js"></script>
     <script>
         let selectedFile = null;
         let currentInputMethod = 'text'; // 'text' or 'file'
@@ -1645,21 +1646,21 @@ const HTML_PAGE = `
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }
 
-        // 表单提交处理
+        // 表单提交处理（支持按行合成并打包下载）
         document.getElementById('ttsForm').addEventListener('submit', async function(e) {
             e.preventDefault();
-            
+
             const voice = document.getElementById('voice').value;
             const speed = document.getElementById('speed').value;
             const pitch = document.getElementById('pitch').value;
             const style = document.getElementById('style').value;
-            
+
             const generateBtn = document.getElementById('generateBtn');
             const resultContainer = document.getElementById('result');
             const loading = document.getElementById('loading');
             const success = document.getElementById('success');
             const error = document.getElementById('error');
-            
+
             // 验证输入
             if (currentInputMethod === 'text') {
                 const text = document.getElementById('text').value;
@@ -1673,7 +1674,7 @@ const HTML_PAGE = `
                     return;
                 }
             }
-            
+
             // 重置状态
             resultContainer.style.display = 'block';
             loading.style.display = 'block';
@@ -1681,99 +1682,164 @@ const HTML_PAGE = `
             error.style.display = 'none';
             generateBtn.disabled = true;
             generateBtn.textContent = '生成中...';
-            
+
+            const loadingText = document.getElementById('loadingText');
+            const progressInfo = document.getElementById('progressInfo');
+
             try {
-                let response;
-                let textLength = 0;
-                
-                // 更新加载提示
-                const loadingText = document.getElementById('loadingText');
-                const progressInfo = document.getElementById('progressInfo');
-                
                 if (currentInputMethod === 'text') {
-                    // 手动输入文本
-                    const text = document.getElementById('text').value;
-                    textLength = text.length;
-                    
-                    // 根据文本长度显示不同的提示
-                    if (textLength > 3000) {
-                        loadingText.textContent = '正在处理长文本，请耐心等待...';
-                        progressInfo.textContent = '文本长度: ' + textLength + ' 字符，预计需要 ' + (Math.ceil(textLength / 1500) * 2) + ' 秒';
+                    const rawText = document.getElementById('text').value;
+
+                    // 按行拆分（保留非空行）
+                    const lines = rawText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+
+                    if (lines.length > 1) {
+                        // 多行：逐行合成并打包为 zip 下载
+                        const audioBlobs = [];
+
+                        loadingText.textContent = '正在按行生成语音...';
+                        progressInfo.textContent = '总行数: ' + lines.length;
+
+                        // 顺序处理，避免触发频率限制
+                        for (let i = 0; i < lines.length; i++) {
+                            const line = lines[i];
+                            progressInfo.textContent = '正在生成 ' + (i + 1) + '/' + lines.length;
+
+                            const resp = await fetch('/v1/audio/speech', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    input: line,
+                                    voice: voice,
+                                    speed: parseFloat(speed),
+                                    pitch: pitch,
+                                    style: style
+                                })
+                            });
+
+                            if (!resp.ok) {
+                                let errMsg = '生成失败';
+                                try { const data = await resp.json(); errMsg = (data && data.error && data.error.message) ? data.error.message : errMsg; } catch(_){ }
+                                throw new Error('第 ' + (i + 1) + ' 行生成失败: ' + errMsg);
+                            }
+                            const blob = await resp.blob();
+                            // 文件名：line-001.mp3
+                            const idx = String(i + 1).padStart(3, '0');
+                            const filename = 'line-' + idx + '.mp3';
+                            
+                            audioBlobs.push({ name: filename, blob });
+
+                            // 小延迟，降低突发并发
+                            await new Promise(r => setTimeout(r, 120));
+                        }
+
+                        // 生成 zip 包
+                        loadingText.textContent = '正在打包音频文件...';
+                        progressInfo.textContent = '打包 ' + audioBlobs.length + ' 个文件';
+
+                        const zip = new JSZip();
+                        audioBlobs.forEach(item => zip.file(item.name, item.blob));
+                        const zipBlob = await zip.generateAsync({ type: 'blob' }, function(metadata) {
+                            progressInfo.textContent = '打包中 ' + Math.round(metadata.percent) + '%';
+                        });
+
+                        const zipUrl = URL.createObjectURL(zipBlob);
+                        const audioPlayer = document.getElementById('audioPlayer');
+                        const downloadBtn = document.getElementById('downloadBtn');
+
+                        audioPlayer.style.display = 'none';
+                        downloadBtn.style.display = 'inline-flex';
+                        downloadBtn.href = zipUrl;
+                        downloadBtn.download = 'speech_lines.zip';
+
+                        loading.style.display = 'none';
+                        success.style.display = 'block';
+
                     } else {
+                        // 单行：与原有行为一致
                         loadingText.textContent = '正在生成语音，请稍候...';
-                        progressInfo.textContent = '文本长度: ' + textLength + ' 字符';
+                        progressInfo.textContent = '文本长度: ' + rawText.length + ' 字符';
+
+                        const resp = await fetch('/v1/audio/speech', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                input: rawText,
+                                voice: voice,
+                                speed: parseFloat(speed),
+                                pitch: pitch,
+                                style: style
+                            })
+                        });
+
+                        if (!resp.ok) {
+                            const data = await resp.json();
+                            throw new Error(data.error?.message || '生成失败');
+                        }
+
+                        const audioBlob = await resp.blob();
+                        const audioUrl = URL.createObjectURL(audioBlob);
+
+                        const audioPlayer = document.getElementById('audioPlayer');
+                        const downloadBtn = document.getElementById('downloadBtn');
+
+                        audioPlayer.style.display = 'block';
+                        audioPlayer.src = audioUrl;
+                        downloadBtn.href = audioUrl;
+                        downloadBtn.download = 'speech.mp3';
+
+                        loading.style.display = 'none';
+                        success.style.display = 'block';
                     }
-                    
-                    response = await fetch('/v1/audio/speech', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify({
-                            input: text,
-                            voice: voice,
-                            speed: parseFloat(speed),
-                            pitch: pitch,
-                            style: style
-                        })
-                    });
+
                 } else {
-                    // 文件上传
+                    // 文件上传走后端合并逻辑
                     loadingText.textContent = '正在处理上传的文件...';
                     progressInfo.textContent = '文件: ' + selectedFile.name + ' (' + formatFileSize(selectedFile.size) + ')';
-                    
+
                     const formData = new FormData();
                     formData.append('file', selectedFile);
                     formData.append('voice', voice);
                     formData.append('speed', speed);
                     formData.append('pitch', pitch);
                     formData.append('style', style);
-                    
-                    response = await fetch('/v1/audio/speech', {
+
+                    const response = await fetch('/v1/audio/speech', {
                         method: 'POST',
                         body: formData
                     });
+
+                    if (!response.ok) {
+                        const errorData = await response.json();
+                        throw new Error(errorData.error?.message || '生成失败');
+                    }
+
+                    const audioBlob = await response.blob();
+                    const audioUrl = URL.createObjectURL(audioBlob);
+
+                    const audioPlayer = document.getElementById('audioPlayer');
+                    const downloadBtn = document.getElementById('downloadBtn');
+
+                    audioPlayer.style.display = 'block';
+                    audioPlayer.src = audioUrl;
+                    downloadBtn.href = audioUrl;
+                    downloadBtn.download = 'speech.mp3';
+
+                    loading.style.display = 'none';
+                    success.style.display = 'block';
                 }
-                
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error?.message || '生成失败');
-                }
-                
-                const audioBlob = await response.blob();
-                const audioUrl = URL.createObjectURL(audioBlob);
-                
-                // 显示音频播放器
-                const audioPlayer = document.getElementById('audioPlayer');
-                const downloadBtn = document.getElementById('downloadBtn');
-                
-                audioPlayer.src = audioUrl;
-                downloadBtn.href = audioUrl;
-                
-                loading.style.display = 'none';
-                success.style.display = 'block';
-                
+
                 // 显示公众号推广组件
                 setTimeout(() => {
                     const wechatPromotion = document.getElementById('wechatPromotion');
                     wechatPromotion.style.display = 'block';
                     wechatPromotion.classList.add('fade-in');
                 }, 1000);
-                
+
             } catch (err) {
                 loading.style.display = 'none';
                 error.style.display = 'block';
-                
-                // 根据错误类型显示不同的提示
-                if (err.message.includes('Too many subrequests')) {
-                    error.textContent = '错误: 文本过长导致请求过多，请缩短文本内容或分段处理';
-                } else if (err.message.includes('频率限制') || err.message.includes('429')) {
-                    error.textContent = '错误: 请求过于频繁，请稍后再试';
-                } else if (err.message.includes('分块数量') && err.message.includes('超过限制')) {
-                    error.textContent = '错误: ' + err.message;
-                } else {
-                    error.textContent = '错误: ' + err.message;
-                }
+                error.textContent = '错误: ' + err.message;
             } finally {
                 generateBtn.disabled = false;
                 generateBtn.innerHTML = '<span>🎙️</span><span>开始生成语音</span>';
