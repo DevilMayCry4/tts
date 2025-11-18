@@ -1136,6 +1136,7 @@ const HTML_PAGE = `
                             <span>📥</span>
                             <span>下载音频文件</span>
                         </a>
+                        <div id="previewList" style="display: none; margin-top: 12px;"></div>
                     </div>
                     
                     <div id="error" class="error-message" style="display: none;"></div>
@@ -1265,6 +1266,7 @@ const HTML_PAGE = `
         let selectedAudioFile = null;
         let transcriptionToken = null;
         let currentLanguage = 'en'; // 默认语言
+        let previewUrls = []; // 存放为预览创建的 Object URLs
 
         // 国际化翻译数据
         const translations = {
@@ -1565,6 +1567,22 @@ const HTML_PAGE = `
             });
         }
 
+        function clearPreviews() {
+            try {
+                // 每次生成前清理上次的预览
+                clearPreviews();
+                const previewList = document.getElementById('previewList');
+                if (previewList) previewList.style.display = 'none';
+                const previewList = document.getElementById('previewList');
+                if (previewList) previewList.innerHTML = '';
+            } catch (e) {}
+            // 释放之前创建的 object URLs
+            if (previewUrls && previewUrls.length) {
+                previewUrls.forEach(url => URL.revokeObjectURL(url));
+                previewUrls = [];
+            }
+        }
+
         // 初始化文件上传功能
         function initializeFileUpload() {
             const fileDropZone = document.getElementById('fileDropZone');
@@ -1697,8 +1715,15 @@ const HTML_PAGE = `
                         // 多行：逐行合成并打包为 zip 下载
                         const audioBlobs = [];
 
+                        // 清理上次预览
+                        clearPreviews();
+                        const previewList = document.getElementById('previewList');
+
                         loadingText.textContent = '正在按行生成语音...';
                         progressInfo.textContent = '总行数: ' + lines.length;
+                        if (previewList) {
+                            previewList.style.display = 'block';
+                        }
 
                         // 顺序处理，避免触发频率限制
                         for (let i = 0; i < lines.length; i++) {
@@ -1726,8 +1751,32 @@ const HTML_PAGE = `
                             // 文件名：line-001.mp3
                             const idx = String(i + 1).padStart(3, '0');
                             const filename = 'line-' + idx + '.mp3';
-                            
                             audioBlobs.push({ name: filename, blob });
+
+                            // 生成预览播放器
+                            try {
+                                const url = URL.createObjectURL(blob);
+                                previewUrls.push(url);
+                                if (previewList) {
+                                    const item = document.createElement('div');
+                                    item.style.marginBottom = '8px';
+                                    const label = document.createElement('div');
+                                    label.style.fontSize = '12px';
+                                    label.style.color = '#475569';
+                                    label.style.marginBottom = '4px';
+                                    const snippet = line.length > 40 ? (line.slice(0, 37) + '...') : line;
+                                    label.textContent = (i + 1) + '. ' + snippet;
+                                    const audio = document.createElement('audio');
+                                    audio.controls = true;
+                                    audio.src = url;
+                                    audio.style.width = '100%';
+                                    item.appendChild(label);
+                                    item.appendChild(audio);
+                                    previewList.appendChild(item);
+                                }
+                            } catch (e) {
+                                console.warn('创建预览失败', e);
+                            }
 
                             // 小延迟，降低突发并发
                             await new Promise(r => setTimeout(r, 120));
@@ -1751,6 +1800,12 @@ const HTML_PAGE = `
                         downloadBtn.style.display = 'inline-flex';
                         downloadBtn.href = zipUrl;
                         downloadBtn.download = 'speech_lines.zip';
+
+                        // 确保预览列表可见（如果存在）
+                        const previewListEl = document.getElementById('previewList');
+                        if (previewListEl && previewListEl.children.length > 0) {
+                            previewListEl.style.display = 'block';
+                        }
 
                         loading.style.display = 'none';
                         success.style.display = 'block';
@@ -1785,8 +1840,12 @@ const HTML_PAGE = `
 
                         audioPlayer.style.display = 'block';
                         audioPlayer.src = audioUrl;
+                        downloadBtn.style.display = 'inline-flex';
                         downloadBtn.href = audioUrl;
                         downloadBtn.download = 'speech.mp3';
+
+                        // 隐藏预览列表（单文件模式）
+                        if (previewList) previewList.style.display = 'none';
 
                         loading.style.display = 'none';
                         success.style.display = 'block';
@@ -1822,8 +1881,13 @@ const HTML_PAGE = `
 
                     audioPlayer.style.display = 'block';
                     audioPlayer.src = audioUrl;
+                    downloadBtn.style.display = 'inline-flex';
                     downloadBtn.href = audioUrl;
                     downloadBtn.download = 'speech.mp3';
+
+                    // 隐藏预览列表（文件上传单合并音频）
+                    const previewList2 = document.getElementById('previewList');
+                    if (previewList2) previewList2.style.display = 'none';
 
                     loading.style.display = 'none';
                     success.style.display = 'block';
