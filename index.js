@@ -84,42 +84,148 @@ const HTML_PAGE = `
         }
         
         .header .features {
-            display: flex;
-            justify-content: center;
-            gap: 30px;
-            flex-wrap: wrap;
-            margin-top: 20px;
-        }
-        
-        .feature-item {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            color: var(--text-secondary);
-            font-size: 0.875rem;
-            font-weight: 500;
-        }
-        
-        .feature-icon {
-            width: 20px;
-            height: 20px;
-            color: var(--success-color);
-        }
-        
-        .main-content {
-            background: var(--surface-color);
-            border-radius: var(--radius-xl);
-            box-shadow: var(--shadow-lg);
-            border: 1px solid var(--border-color);
-            overflow: hidden;
-        }
-        
-        .form-container {
-            padding: 40px;
-        }
-        
-        .form-group {
-            margin-bottom: 24px;
+                } else {
+                    // 文件上传：在客户端按行读取并逐行合成（生成预览并打包下载）
+                    loadingText.textContent = '正在按行读取文件并生成语音...';
+                    progressInfo.textContent = '文件: ' + selectedFile.name + ' (' + formatFileSize(selectedFile.size) + ')';
+
+                    // 读取文件内容
+                    const fileText = await selectedFile.text();
+                    if (!fileText || !fileText.trim()) {
+                        throw new Error('文件内容为空');
+                    }
+
+                    // 按行拆分并过滤空行
+                    const linesFromFile = fileText.split(/\r?\n/).map(l => l.trim()).filter(l => l.length > 0);
+
+                    if (linesFromFile.length === 0) {
+                        throw new Error('文件中没有可用的文本行');
+                    }
+
+                    // 若只有一行，则沿用单文件合成逻辑（返回单个音频）
+                    if (linesFromFile.length === 1) {
+                        loadingText.textContent = '正在生成语音，请稍候...';
+                        progressInfo.textContent = '文本长度: ' + linesFromFile[0].length + ' 字符';
+
+                        const resp = await fetch('/v1/audio/speech', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                input: linesFromFile[0],
+                                voice: voice,
+                                speed: parseFloat(speed),
+                                pitch: pitch,
+                                style: style
+                            })
+                        });
+
+                        if (!resp.ok) {
+                            const data = await resp.json();
+                            throw new Error(data.error?.message || '生成失败');
+                        }
+
+                        const audioBlob = await resp.blob();
+                        const audioUrl = URL.createObjectURL(audioBlob);
+
+                        const audioPlayer = document.getElementById('audioPlayer');
+                        const downloadBtn = document.getElementById('downloadBtn');
+
+                        audioPlayer.style.display = 'block';
+                        audioPlayer.src = audioUrl;
+                        downloadBtn.style.display = 'inline-flex';
+                        downloadBtn.href = audioUrl;
+                        downloadBtn.download = 'speech.mp3';
+
+                        loading.style.display = 'none';
+                        success.style.display = 'block';
+                    } else {
+                        // 多行：逐行合成并生成预览、打包
+                        const audioBlobs = [];
+                        const previewList = document.getElementById('previewList');
+                        if (previewList) previewList.style.display = 'block';
+
+                        loadingText.textContent = '正在按行生成语音...';
+                        progressInfo.textContent = '总行数: ' + linesFromFile.length;
+
+                        for (let i = 0; i < linesFromFile.length; i++) {
+                            const line = linesFromFile[i];
+                            progressInfo.textContent = '正在生成 ' + (i + 1) + '/' + linesFromFile.length;
+
+                            const resp = await fetch('/v1/audio/speech', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    input: line,
+                                    voice: voice,
+                                    speed: parseFloat(speed),
+                                    pitch: pitch,
+                                    style: style
+                                })
+                            });
+
+                            if (!resp.ok) {
+                                let errMsg = '生成失败';
+                                try { const data = await resp.json(); errMsg = (data && data.error && data.error.message) ? data.error.message : errMsg; } catch(_){ }
+                                throw new Error('第 ' + (i + 1) + ' 行生成失败: ' + errMsg);
+                            }
+
+                            const blob = await resp.blob();
+                            const idx = String(i + 1).padStart(3, '0');
+                            const filename = 'line-' + idx + '.mp3';
+                            audioBlobs.push({ name: filename, blob });
+
+                            // 生成预览播放器
+                            try {
+                                const url = URL.createObjectURL(blob);
+                                previewUrls.push(url);
+                                if (previewList) {
+                                    const item = document.createElement('div');
+                                    item.style.marginBottom = '8px';
+                                    const label = document.createElement('div');
+                                    label.style.fontSize = '12px';
+                                    label.style.color = '#475569';
+                                    label.style.marginBottom = '4px';
+                                    const snippet = line.length > 40 ? (line.slice(0, 37) + '...') : line;
+                                    label.textContent = (i + 1) + '. ' + snippet;
+                                    const audio = document.createElement('audio');
+                                    audio.controls = true;
+                                    audio.src = url;
+                                    audio.style.width = '100%';
+                                    item.appendChild(label);
+                                    item.appendChild(audio);
+                                    previewList.appendChild(item);
+                                }
+                            } catch (e) {
+                                console.warn('创建预览失败', e);
+                            }
+
+                            // 小延迟，降低速率限制风险
+                            await new Promise(r => setTimeout(r, 120));
+                        }
+
+                        // 打包为 zip
+                        loadingText.textContent = '正在打包音频文件...';
+                        progressInfo.textContent = '打包 ' + audioBlobs.length + ' 个文件';
+
+                        const zip = new JSZip();
+                        audioBlobs.forEach(item => zip.file(item.name, item.blob));
+                        const zipBlob = await zip.generateAsync({ type: 'blob' }, function(metadata) {
+                            progressInfo.textContent = '打包中 ' + Math.round(metadata.percent) + '%';
+                        });
+
+                        const zipUrl = URL.createObjectURL(zipBlob);
+                        const audioPlayer = document.getElementById('audioPlayer');
+                        const downloadBtn = document.getElementById('downloadBtn');
+
+                        audioPlayer.style.display = 'none';
+                        downloadBtn.style.display = 'inline-flex';
+                        downloadBtn.href = zipUrl;
+                        downloadBtn.download = 'speech_lines.zip';
+
+                        loading.style.display = 'none';
+                        success.style.display = 'block';
+                    }
+                }
         }
         
         .form-label {
